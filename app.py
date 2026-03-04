@@ -38,6 +38,12 @@ from src import (
     shapley_ci_chart,
 )
 from src.data_generator import CHANNEL_COLORS, CHANNEL_TYPE, CHANNEL_CPT
+from src.mmm_data_generator import generate_mmm_data, mmm_summary_stats, ADSTOCK_DECAY, CHANNEL_TRUE_CONTRIBUTION
+from src.hybrid_attribution import (
+    blend_mta_mmm, compute_unified_metrics,
+    compare_mta_vs_mmm_vs_hybrid, offline_credit_recovery,
+    DEFAULT_ALPHA,
+)
 
 
 # ── Page config ───────────────────────────────────────────────────────────────
@@ -84,7 +90,7 @@ st.markdown("""
 # ── Sidebar ───────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.image("https://img.shields.io/badge/MTA%20Demo-Shapley%20Values-9b59b6?style=for-the-badge",
-             use_container_width=True)
+             width='stretch')
     st.markdown("### ⚙️ Data Configuration")
     n_customers = st.slider("Number of customers", 500, 10_000, 3000, step=500)
     seed = st.number_input("Random seed", 0, 999, 42)
@@ -168,6 +174,11 @@ def load_bootstrap_ci(journeys_hash, _journeys, n_boot):
     return shapley_bootstrap_ci(_journeys, n_bootstrap=n_boot, n_mc_per_boot=300, seed=42)
 
 
+@st.cache_data(show_spinner=False)
+def load_mmm_data(n_weeks: int = 104, seed: int = 42):
+    return generate_mmm_data(n_weeks=n_weeks, seed=seed)
+
+
 with st.spinner("🔄 Generating synthetic journeys & running attribution models…"):
     df_tp, journeys = load_data(n_customers, seed)
     journeys_hash = hash((n_customers, seed))
@@ -198,7 +209,7 @@ st.markdown(
 )
 
 # ── Tabs ──────────────────────────────────────────────────────────────────────
-tab_overview, tab_compare, tab_shapley, tab_synergy, tab_journey, tab_budget, tab_markov = st.tabs([
+tab_overview, tab_compare, tab_shapley, tab_synergy, tab_journey, tab_budget, tab_markov, tab_mmm = st.tabs([
     "📊 Overview",
     "🎯 Model Comparison",
     "🔬 Shapley Deep Dive",
@@ -206,6 +217,7 @@ tab_overview, tab_compare, tab_shapley, tab_synergy, tab_journey, tab_budget, ta
     "🛤️ Journey Explorer",
     "💰 Budget Optimizer",
     "📈 Markov Analysis",
+    "🔀 MMM + MTA Hybrid",
 ])
 
 
@@ -238,9 +250,9 @@ with tab_overview:
     st.markdown("---")
     col_left, col_right = st.columns(2)
     with col_left:
-        st.plotly_chart(channel_funnel_bar(summary_df), use_container_width=True)
+        st.plotly_chart(channel_funnel_bar(summary_df), width='stretch')
     with col_right:
-        st.plotly_chart(conversion_rate_bar(summary_df), use_container_width=True)
+        st.plotly_chart(conversion_rate_bar(summary_df), width='stretch')
 
     st.markdown("---")
     st.subheader("🧾 Channel Summary")
@@ -248,7 +260,7 @@ with tab_overview:
     disp.columns = ["Channel","Type","Touchpoints","Conversions","Conv. Rate","Revenue ($)"]
     disp["Conv. Rate"] = (disp["Conv. Rate"] * 100).round(1).astype(str) + "%"
     disp["Revenue ($)"] = disp["Revenue ($)"].apply(lambda x: f"${x:,.0f}")
-    st.dataframe(disp, use_container_width=True, hide_index=True)
+    st.dataframe(disp, width='stretch', hide_index=True)
 
     st.markdown("---")
     st.subheader("📋 Sample Touchpoint Log")
@@ -261,7 +273,7 @@ with tab_overview:
                      "position":"Position","journey_length":"Path Length",
                      "converted":"Converted"
                  }),
-                 use_container_width=True, hide_index=True)
+                 width='stretch', hide_index=True)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -284,20 +296,20 @@ with tab_compare:
     if not selected:
         st.warning("Please select at least one model.")
     else:
-        st.plotly_chart(attribution_comparison(attr_df, selected), use_container_width=True)
+        st.plotly_chart(attribution_comparison(attr_df, selected), width='stretch')
 
         st.markdown("---")
         st.subheader("📊 Attribution Matrix (% credit)")
         pct_df = (attr_df[selected] * 100).round(2)
         st.dataframe(
             pct_df.style.background_gradient(cmap="Purples", axis=None),
-            use_container_width=True,
+            width='stretch',
         )
 
         st.markdown("---")
         st.subheader("🔍 Channel-Level Model Sensitivity")
         ch_label = st.selectbox("Select channel", attr_df.index.tolist())
-        st.plotly_chart(model_radar(attr_df[selected], ch_label), use_container_width=True)
+        st.plotly_chart(model_radar(attr_df[selected], ch_label), width='stretch')
 
         # Key insight callout
         shapley_col = "Shapley"
@@ -337,7 +349,7 @@ with tab_shapley:
                 ch: float(attr_df.loc[CHANNEL_LABELS[ch], "Shapley"])
                 for ch in CHANNELS if CHANNEL_LABELS[ch] in attr_df.index
             }
-            st.plotly_chart(shapley_waterfall(sh_vals), use_container_width=True)
+            st.plotly_chart(shapley_waterfall(sh_vals), width='stretch')
         else:
             st.info("Shapley values not computed.")
 
@@ -352,7 +364,7 @@ with tab_shapley:
         available = [m for m in compare_models if m in attr_df.columns]
         sub_df = (attr_df[available] * 100).round(1)
         sub_df.columns = [m.replace(" (Ordered)", "\n(Ordered)") for m in sub_df.columns]
-        st.dataframe(sub_df.style.background_gradient(cmap="Purples"), use_container_width=True)
+        st.dataframe(sub_df.style.background_gradient(cmap="Purples"), width='stretch')
 
     st.markdown("---")
     st.subheader("📐 Mathematical Formulation")
@@ -406,7 +418,7 @@ with tab_shapley:
             yaxis_title="Percentage Point Difference",
             height=380, template="plotly_white",
         )
-        st.plotly_chart(fig_diff, use_container_width=True)
+        st.plotly_chart(fig_diff, width='stretch')
         st.caption(
             "Positive = channel gains credit when position/order is accounted for "
             "(top-funnel channels are sampled earlier under Plackett-Luce weighting); "
@@ -425,7 +437,7 @@ with tab_shapley:
         with st.spinner(f"Computing bootstrap CIs ({n_bootstrap} resamples, ~18 s)…"):
             ci_df = load_bootstrap_ci(journeys_hash, journeys, n_bootstrap)
 
-        st.plotly_chart(shapley_ci_chart(ci_df), use_container_width=True)
+        st.plotly_chart(shapley_ci_chart(ci_df), width='stretch')
 
         n_valid = int(ci_df["n_valid_boots"].iloc[0])
         if n_valid < n_bootstrap:
@@ -448,7 +460,7 @@ with tab_shapley:
             "Lower 95% CI", "Upper 95% CI",
             "CI Width", "Std Error"
         ]
-        st.dataframe(ci_disp, use_container_width=True, hide_index=True)
+        st.dataframe(ci_disp, width='stretch', hide_index=True)
         st.caption(
             f"Point estimates: exact Shapley with GBT (150 trees) on full dataset. "
             f"CIs: {n_valid} valid bootstrap resamples using exact Shapley with "
@@ -480,7 +492,7 @@ with tab_synergy:
     with st.spinner("Computing Shapley Interaction Index…"):
         int_df = load_interactions(journeys_hash, journeys)
 
-    st.plotly_chart(interaction_heatmap(int_df), use_container_width=True)
+    st.plotly_chart(interaction_heatmap(int_df), width='stretch')
 
     st.markdown("---")
     st.subheader("Top Synergies & Substitutions")
@@ -494,14 +506,14 @@ with tab_synergy:
     col_s, col_sub = st.columns(2)
     with col_s:
         st.markdown("**Top 5 Synergistic Pairs** 🤝")
-        top5 = synergy_df.head(5)
+        top5 = synergy_df.head(5).copy()
         top5["Relationship"] = "Synergy 🟢"
-        st.dataframe(top5, use_container_width=True, hide_index=True)
+        st.dataframe(top5, width='stretch', hide_index=True)
     with col_sub:
         st.markdown("**Top 5 Substitutable Pairs** ↔️")
-        bot5 = synergy_df.tail(5).sort_values("Index")
+        bot5 = synergy_df.tail(5).sort_values("Index").copy()
         bot5["Relationship"] = "Substitution 🔴"
-        st.dataframe(bot5, use_container_width=True, hide_index=True)
+        st.dataframe(bot5, width='stretch', hide_index=True)
 
     st.info("💡 Use synergistic pairs to inform **media mix** decisions — channels that amplify "
             "each other's impact should be run concurrently, not traded off against each other.")
@@ -514,14 +526,14 @@ with tab_journey:
     st.subheader("🛤️ Customer Journey Flow")
 
     sankey_n = st.slider("Number of converting journeys to visualise", 50, 500, 200, step=50)
-    st.plotly_chart(journey_sankey(journeys, top_n=sankey_n), use_container_width=True)
+    st.plotly_chart(journey_sankey(journeys, top_n=sankey_n), width='stretch')
 
     st.markdown("---")
     col_paths, col_stats = st.columns([3, 2])
 
     with col_paths:
         st.subheader("🏆 Top Converting Paths")
-        st.dataframe(paths_df, use_container_width=True, hide_index=True)
+        st.dataframe(paths_df, width='stretch', hide_index=True)
 
     with col_stats:
         st.subheader("Journey Length Distribution")
@@ -542,7 +554,7 @@ with tab_journey:
             yaxis_title="Count", height=340,
             template="plotly_white", legend=dict(x=0.65, y=0.95),
         )
-        st.plotly_chart(fig_len, use_container_width=True)
+        st.plotly_chart(fig_len, width='stretch')
 
     st.markdown("---")
     st.subheader("📊 Online vs Offline Channel Mix")
@@ -563,7 +575,7 @@ with tab_journey:
         yaxis_title="% Online Touchpoints",
         height=350, template="plotly_white",
     )
-    st.plotly_chart(fig_mix, use_container_width=True)
+    st.plotly_chart(fig_mix, width='stretch')
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -601,9 +613,9 @@ with tab_budget:
 
         col_l, col_r = st.columns(2)
         with col_l:
-            st.plotly_chart(budget_waterfall(opt_df), use_container_width=True)
+            st.plotly_chart(budget_waterfall(opt_df), width='stretch')
         with col_r:
-            st.plotly_chart(budget_delta_chart(opt_df), use_container_width=True)
+            st.plotly_chart(budget_delta_chart(opt_df), width='stretch')
 
         st.markdown("---")
         st.subheader("Allocation Details")
@@ -617,7 +629,7 @@ with tab_budget:
         disp_opt["Optimised ($)"]  = disp_opt["Optimised ($)"].apply(lambda x: f"${x:,.0f}")
         disp_opt["Delta ($)"]      = disp_opt["Delta ($)"].apply(lambda x: f"${x:+,.0f}")
         disp_opt["Delta (%)"]      = disp_opt["Delta (%)"].apply(lambda x: f"{x:+.1f}%")
-        st.dataframe(disp_opt, use_container_width=True, hide_index=True)
+        st.dataframe(disp_opt, width='stretch', hide_index=True)
 
         total_lift = opt_df["response_lift"].sum()
         total_curr_resp = opt_df["current_response"].sum()
@@ -658,7 +670,7 @@ with tab_markov:
 
     col_heat, col_bar = st.columns([3, 2])
     with col_heat:
-        st.plotly_chart(markov_transition_heatmap(journeys), use_container_width=True)
+        st.plotly_chart(markov_transition_heatmap(journeys), width='stretch')
 
     with col_bar:
         st.subheader("Removal Effect Attribution")
@@ -682,7 +694,7 @@ with tab_markov:
             template="plotly_white",
             margin=dict(l=130, t=50),
         )
-        st.plotly_chart(fig_mkv, use_container_width=True)
+        st.plotly_chart(fig_mkv, width='stretch')
 
     st.markdown("---")
     st.subheader("Markov vs Shapley Comparison")
@@ -706,7 +718,7 @@ with tab_markov:
             height=380, template="plotly_white",
         )
         fig_comp.update_xaxes(tickangle=-25)
-        st.plotly_chart(fig_comp, use_container_width=True)
+        st.plotly_chart(fig_comp, width='stretch')
 
         corr = comp["Shapley"].corr(comp["Markov Chain"])
         st.metric("Shapley ↔ Markov correlation", f"{corr:.3f}",
@@ -729,7 +741,557 @@ with tab_markov:
         """)
 
 
-# ── Footer ────────────────────────────────────────────────────────────────────
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TAB 8 — MMM + MTA HYBRID
+# ═══════════════════════════════════════════════════════════════════════════════
+with tab_mmm:
+
+    # ── Pull correct variables from MTA ─────────────────────────────────────
+    total_conv = sum(1 for j in journeys if j["converted"])
+    total_rev  = sum(j["value"] for j in journeys)
+
+    shapley_w = (
+        {ch: float(attr_df.loc[CHANNEL_LABELS[ch], "Shapley"])
+         for ch in CHANNELS if CHANNEL_LABELS[ch] in attr_df.index}
+        if "Shapley" in attr_df.columns else {}
+    )
+    mmm_contributions = {k: v for k, v in CHANNEL_TRUE_CONTRIBUTION.items() if k != "base"}
+
+    # ── Alpha slider in sidebar ──────────────────────────────────────────────
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("### 🔀 Hybrid MMM+MTA Settings")
+    alpha = st.sidebar.slider(
+        "MTA Weight α (online channels)",
+        min_value=0.0, max_value=1.0, value=DEFAULT_ALPHA, step=0.05,
+        help="α=1 → pure MTA, α=0 → pure MMM. Offline channels always use 100% MMM.",
+    )
+
+    # ── Page header ──────────────────────────────────────────────────────────
+    st.markdown("## 🔀 Hybrid MMM + MTA Attribution")
+
+    st.info("""
+    **Why this tab?**
+    Your existing MTA models (Shapley, Markov) can only credit channels that appear in
+    **digital journey logs**. Offline channels — TV, Radio, Direct Mail, Agent Visits —
+    are **invisible to MTA** even though they genuinely drive conversions upstream.
+
+    **Marketing Mix Modelling (MMM)** fixes this by measuring offline impact at the
+    **weekly aggregate level** using regression with adstock + saturation transformations.
+    This tab blends both models into one unified framework with a **common metric
+    (CPIC & Marginal ROI)** so every channel can be compared on the same axis.
+    """)
+
+    # ── Load MMM data (cached) ───────────────────────────────────────────────
+    with st.spinner("Generating 104-week synthetic MMM dataset..."):
+        mmm_df, mmm_meta = load_mmm_data(n_weeks=104, seed=42)
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # SECTION 1 — What is MMM and how does it work?
+    # ─────────────────────────────────────────────────────────────────────────
+    st.markdown("---")
+    st.markdown("### 📖 Section 1 — How MMM Works")
+
+    col_explain1, col_explain2, col_explain3 = st.columns(3)
+    with col_explain1:
+        st.markdown("""
+        **Step 1 — Collect Weekly Data**
+
+        Instead of tracking individual users, MMM works at the **aggregate level**:
+        - How much did we spend on TV this week?
+        - How many radio impressions ran?
+        - How many direct mail pieces were sent?
+        - What were total conversions that week?
+
+        External factors like seasonality, holidays, and competitor activity
+        are also included as control variables.
+        """)
+    with col_explain2:
+        st.markdown("""
+        **Step 2 — Apply Adstock & Saturation**
+
+        Two transformations make the model realistic:
+
+        **Adstock (carryover):** A TV ad aired Monday still influences
+        purchases on Thursday. Each channel has a *decay rate* λ:
+        `adstock_t = spend_t + λ × adstock_(t-1)`
+
+        **Saturation:** Doubling spend doesn't double conversions.
+        A Hill function captures this: after a point, more spend
+        delivers diminishing returns.
+        """)
+    with col_explain3:
+        st.markdown("""
+        **Step 3 — Fit Regression & Extract Contributions**
+
+        A Bayesian regression model estimates how much each channel's
+        (adstock-transformed) spend contributed to total conversions.
+
+        Output: **contribution share per channel** — e.g.,
+        "TV drove 18% of this quarter's conversions."
+
+        This is what MTA *cannot* tell you for offline channels.
+        The Hybrid model then combines MMM offline shares with
+        MTA online shares into one unified weight.
+        """)
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # SECTION 2 — MMM Data Overview
+    # ─────────────────────────────────────────────────────────────────────────
+    st.markdown("---")
+    st.markdown("### 📊 Section 2 — Synthetic MMM Dataset (104 Weeks)")
+
+    st.markdown("""
+    The dataset below simulates **2 years of weekly marketing data** for all channels.
+    Each row = one ISO week. This is the kind of data you'd feed into a real MMM model.
+    """)
+
+    m1, m2, m3, m4, m5 = st.columns(5)
+    m1.metric("Weeks of Data",      f"{len(mmm_df)}")
+    m2.metric("Total Conversions",  f"{mmm_df['conversions'].sum():,}")
+    m3.metric("Total Revenue",      f"${mmm_df['revenue'].sum()/1e6:.1f}M")
+    m4.metric("Avg Weekly Conv.",   f"{mmm_df['conversions'].mean():.0f}")
+    m5.metric("Peak Week Conv.",    f"{mmm_df['conversions'].max()}")
+
+    with st.expander("📋 View raw MMM weekly data (first 10 rows)", expanded=False):
+        display_cols = [
+            "iso_week", "tv_grp", "tv_spend", "radio_impressions_000",
+            "radio_spend", "direct_mail_pieces", "direct_mail_spend",
+            "agent_visits", "agent_visit_spend",
+            "paid_search_spend", "seasonality_index",
+            "is_holiday_week", "conversions", "revenue"
+        ]
+        st.dataframe(
+            mmm_df[display_cols].head(10).style.format({
+                "tv_spend": "${:,.0f}", "radio_spend": "${:,.0f}",
+                "direct_mail_spend": "${:,.0f}", "agent_visit_spend": "${:,.0f}",
+                "paid_search_spend": "${:,.0f}", "revenue": "${:,.0f}",
+                "seasonality_index": "{:.3f}",
+            }),
+            width='stretch',
+        )
+        st.caption("tv_grp = Gross Rating Points | radio_impressions_000 = impressions in thousands | direct_mail_pieces = pieces mailed | agent_visits = visits count")
+
+    # Spend by channel bar
+    summary_mmm = mmm_summary_stats(mmm_df)
+    fig_spend = px.bar(
+        summary_mmm, x="Channel", y="Total Spend ($)", color="Type",
+        color_discrete_map={"Offline": "#e6550d", "Online": "#1f77b4"},
+        title="Total Spend Over 2 Years — Offline vs Online Channels",
+        text_auto=".2s",
+    )
+    fig_spend.update_layout(height=380, plot_bgcolor="white",
+                            xaxis_title="", yaxis_title="Total Spend ($)")
+    st.plotly_chart(fig_spend, width='stretch')
+
+    # Active weeks info
+    st.markdown("""
+    > **Notice:** Offline channels (TV, Radio, Direct Mail) show **fewer than 104 active weeks**.
+    > This is intentional — offline media is typically run in **flights** (bursts), not continuously.
+    > This is what makes MMM necessary: the adstock model tracks carryover effect
+    > *between* flights, which MTA completely misses.
+    """)
+
+    # Conversions over time + seasonality
+    st.markdown("#### Weekly Conversions with Seasonality & Holiday Effects")
+    fig_conv = go.Figure()
+    fig_conv.add_trace(go.Scatter(
+        x=mmm_df["week_start_date"], y=mmm_df["conversions"],
+        name="Weekly Conversions", line=dict(color="#2196F3", width=1.8),
+        fill="tozeroy", fillcolor="rgba(33,150,243,0.08)",
+    ))
+    fig_conv.add_trace(go.Scatter(
+        x=mmm_df["week_start_date"],
+        y=(mmm_df["seasonality_index"] * mmm_df["conversions"].mean()).round(0),
+        name="Seasonality Trend (scaled)", line=dict(color="#e6550d", dash="dot", width=2),
+    ))
+    holiday_wks = mmm_df[mmm_df["is_holiday_week"] == 1]
+    fig_conv.add_trace(go.Scatter(
+        x=holiday_wks["week_start_date"], y=holiday_wks["conversions"],
+        mode="markers", name="Holiday Week",
+        marker=dict(color="gold", size=9, symbol="star",
+                    line=dict(color="#333", width=1)),
+    ))
+    fig_conv.update_layout(
+        height=380, plot_bgcolor="white",
+        title="Conversions spike on holiday weeks (Diwali, Christmas, New Year) and follow annual seasonality",
+        xaxis_title="Week", yaxis_title="Conversions",
+        legend=dict(orientation="h", y=1.05),
+    )
+    st.plotly_chart(fig_conv, width='stretch')
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # SECTION 3 — Adstock: The Carryover Effect
+    # ─────────────────────────────────────────────────────────────────────────
+    st.markdown("---")
+    st.markdown("### 📉 Section 3 — Adstock: Why Offline Is Hard to Credit")
+
+    st.markdown("""
+    The core reason MTA fails for offline channels is **adstock** — the carryover effect.
+    When a TV campaign ends, its influence doesn't stop immediately. Consumers remember the ad
+    for days or weeks. This means:
+
+    - A customer who converts "organically" on Day 14 may have been influenced by a TV ad on Day 1
+    - MTA sees: `Organic Search → Conversion` and credits Organic Search
+    - Reality: TV planted the intent, Organic Search just captured it
+
+    The chart below shows the gap between **actual spend** (bars) and **adstock-adjusted influence** (line).
+    The line stays elevated even after spend drops to zero — that's the carryover.
+    """)
+
+    ch_to_plot = st.selectbox(
+        "Select channel to explore adstock carryover:",
+        options=["tv", "radio", "direct_mail", "agent_visit"],
+        format_func=lambda x: CHANNEL_LABELS.get(x, x),
+        key="adstock_selector"
+    )
+
+    spend_col   = f"{ch_to_plot}_spend"
+    adstock_col = f"{ch_to_plot}_adstock"
+    decay_val   = ADSTOCK_DECAY[ch_to_plot]
+
+    fig_adstock = go.Figure()
+    fig_adstock.add_trace(go.Bar(
+        x=mmm_df["week_start_date"], y=mmm_df[spend_col],
+        name="Actual Weekly Spend ($)", marker_color="#aec7e8", opacity=0.65,
+    ))
+    fig_adstock.add_trace(go.Scatter(
+        x=mmm_df["week_start_date"], y=mmm_df[adstock_col],
+        name=f"Adstock (λ={decay_val})", line=dict(color="#e6550d", width=2.5),
+    ))
+    fig_adstock.update_layout(
+        height=380, plot_bgcolor="white",
+        title=f"{CHANNEL_LABELS.get(ch_to_plot)} — Actual Spend vs Adstock-Adjusted Influence",
+        xaxis_title="Week", yaxis_title="$",
+        legend=dict(orientation="h", y=1.05),
+    )
+    st.plotly_chart(fig_adstock, width='stretch')
+
+    st.caption(
+        f"λ={decay_val} means {decay_val*100:.0f}% of last week's influence carries into this week. "
+        f"When spend = $0 but adstock > 0, the channel is still driving conversions — "
+        f"MTA records those as 'direct' or 'organic' since no offline touchpoint is logged."
+    )
+
+    # Decay rate comparison table
+    st.markdown("#### Adstock Decay Rates by Channel")
+    decay_df = pd.DataFrame([
+        {"Channel": CHANNEL_LABELS.get(ch, ch),
+         "Type": "Offline" if ch in ("tv","radio","direct_mail","agent_visit") else "Online",
+         "Decay Rate (λ)": v,
+         "Half-Life (weeks)": round(-1 / np.log(v), 1) if v > 0 else 0,
+         "Interpretation": (
+             "Very long memory — ~3-4 weeks" if v >= 0.6 else
+             "Long memory — ~2-3 weeks" if v >= 0.4 else
+             "Moderate — ~1-2 weeks" if v >= 0.2 else
+             "Short — days only"
+         )}
+        for ch, v in ADSTOCK_DECAY.items()
+    ]).sort_values("Decay Rate (λ)", ascending=False)
+
+    st.dataframe(
+        decay_df.style
+        .background_gradient(subset=["Decay Rate (λ)"], cmap="OrRd")
+        .format({"Decay Rate (λ)": "{:.2f}", "Half-Life (weeks)": "{:.1f}"}),
+        width='stretch', hide_index=True,
+    )
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # SECTION 4 — The Offline Credit Gap
+    # ─────────────────────────────────────────────────────────────────────────
+    st.markdown("---")
+    st.markdown("### 🔍 Section 4 — The Offline Credit Gap: MTA vs MMM")
+
+    st.markdown("""
+    This is the core problem this tab solves. The chart below shows the same 10 channels
+    under two different lenses:
+    - **MTA (Shapley)** — credits channels based on digital journey data only
+    - **MMM** — credits channels based on aggregate contribution to conversions (sees offline)
+
+    Offline channels will appear **undercredited in MTA** and **correctly credited in MMM**.
+    """)
+
+    if not shapley_w:
+        st.warning("Shapley model not computed. Enable it in the sidebar and re-run.")
+    else:
+        recovery = offline_credit_recovery(shapley_w, mmm_contributions)
+        comparison_df = compare_mta_vs_mmm_vs_hybrid(shapley_w, mmm_contributions, alpha)
+
+        r1, r2, r3, r4 = st.columns(4)
+        r1.metric("MTA Offline Credit",    f"{recovery['mta_offline_credit_pct']}%",
+                  help="TV + Radio + Direct Mail + Agent Visit share in MTA")
+        r2.metric("MMM Offline Credit",    f"{recovery['mmm_offline_credit_pct']}%",
+                  help="True offline contribution measured by MMM")
+        r3.metric("Undercredit Gap",       f"+{recovery['undercredit_gap_pct']}pp",
+                  delta=f"MTA misses {recovery['undercredit_gap_pct']}pp of offline value",
+                  delta_color="inverse")
+        r4.metric("MTA Online Overcredit", f"+{recovery['undercredit_gap_pct']}pp",
+                  delta="Online channels absorb offline's missing credit",
+                  delta_color="inverse")
+
+        # Side-by-side grouped bar
+        fig_gap = go.Figure()
+        model_config = [
+            ("MTA (Shapley)", "#9b59b6", "mta_pct"),
+            ("MMM (True Contribution)", "#e6550d", "mmm_pct"),
+            (f"Hybrid (α={alpha:.2f})", "#27ae60", "hybrid_pct"),
+        ]
+        for name, color, col in model_config:
+            fig_gap.add_trace(go.Bar(
+                x=comparison_df["channel_label"],
+                y=comparison_df[col],
+                name=name, marker_color=color,
+                text=comparison_df[col].apply(lambda x: f"{x:.1f}%"),
+                textposition="outside",
+                textfont=dict(size=9),
+            ))
+        fig_gap.update_layout(
+            barmode="group", height=440,
+            title="Attribution Credit per Channel: MTA vs MMM vs Hybrid",
+            xaxis_title="Channel", yaxis_title="Credit Share (%)",
+            plot_bgcolor="white",
+            legend=dict(orientation="h", y=1.05),
+        )
+        st.plotly_chart(fig_gap, width='stretch')
+
+        # Credit gap table
+        with st.expander("📋 Full Credit Comparison Table — showing the undercredit/overcredit gap"):
+            gap_display = comparison_df[[
+                "channel_label", "channel_type", "mta_pct", "mmm_pct", "hybrid_pct", "credit_gap"
+            ]].rename(columns={
+                "channel_label": "Channel", "channel_type": "Type",
+                "mta_pct": "MTA %", "mmm_pct": "MMM %",
+                "hybrid_pct": "Hybrid %", "credit_gap": "Gap (MMM−MTA) pp",
+            })
+
+            def color_gap(val):
+                if val > 1:   return "color: #e74c3c; font-weight:bold"
+                if val < -1:  return "color: #27ae60; font-weight:bold"
+                return ""
+
+            st.dataframe(
+                gap_display.style
+                .applymap(color_gap, subset=["Gap (MMM−MTA) pp"])
+                .format({"MTA %": "{:.1f}", "MMM %": "{:.1f}",
+                         "Hybrid %": "{:.1f}", "Gap (MMM−MTA) pp": "{:+.1f}"}),
+                width='stretch', hide_index=True,
+            )
+        st.caption("🔴 Red gap = MTA undercredits this channel vs MMM  |  🟢 Green = MTA overcredits")
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # SECTION 5 — Hybrid Blend
+    # ─────────────────────────────────────────────────────────────────────────
+    st.markdown("---")
+    st.markdown(f"### 🧬 Section 5 — Hybrid Blend (α = {alpha:.2f})")
+
+    st.markdown(f"""
+    The blending formula is simple but powerful:
+
+    | Channel Type | Formula |
+    |---|---|
+    | **Online** (Paid Search, Display, etc.) | `Hybrid = {alpha:.0%} × MTA + {1-alpha:.0%} × MMM` |
+    | **Offline** (TV, Radio, Direct Mail, Agent Visit) | `Hybrid = 100% × MMM` |
+
+    **Why pure MMM for offline?** Because MTA gives offline channels ~0% (they're invisible),
+    so blending in MTA would only dilute the correct MMM signal. Offline always uses MMM fully.
+
+    **Adjust the α slider** in the left sidebar to see how the blend shifts.
+    Higher α = trust MTA more for online. Lower α = trust MMM more for everything.
+    """)
+
+    if shapley_w:
+        hybrid_weights = blend_mta_mmm(shapley_w, mmm_contributions, alpha)
+
+        col_donut, col_bar = st.columns([1, 1])
+
+        with col_donut:
+            fig_donut = go.Figure(go.Pie(
+                labels=[CHANNEL_LABELS.get(ch, ch) for ch in hybrid_weights],
+                values=[v * 100 for v in hybrid_weights.values()],
+                hole=0.45,
+                marker_colors=[CHANNEL_COLORS.get(ch, "#999") for ch in hybrid_weights],
+                textinfo="label+percent",
+                textfont=dict(size=11),
+            ))
+            fig_donut.update_layout(
+                height=420,
+                title=f"Hybrid Attribution Distribution (α={alpha:.2f})",
+                annotations=[dict(text="Hybrid", x=0.5, y=0.5,
+                                  font_size=15, showarrow=False)],
+            )
+            st.plotly_chart(fig_donut, width='stretch')
+
+        with col_bar:
+            # Online vs Offline share comparison across 3 models
+            offline_chs = {"tv", "radio", "direct_mail", "agent_visit"}
+            mta_total = sum(shapley_w.values()) or 1
+            mmm_total = sum(mmm_contributions.values()) or 1
+            h_total   = sum(hybrid_weights.values()) or 1
+
+            mta_off  = sum(shapley_w.get(c,0) for c in offline_chs) / mta_total * 100
+            mmm_off  = sum(mmm_contributions.get(c,0) for c in offline_chs) / mmm_total * 100
+            hyb_off  = sum(hybrid_weights.get(c,0) for c in offline_chs) / h_total * 100
+
+            fig_split = go.Figure()
+            for label, on_val, off_val, color in [
+                ("MTA",    100-mta_off, mta_off, "#9b59b6"),
+                ("MMM",    100-mmm_off, mmm_off, "#e6550d"),
+                (f"Hybrid\n(α={alpha:.2f})", 100-hyb_off, hyb_off, "#27ae60"),
+            ]:
+                fig_split.add_trace(go.Bar(
+                    name="Online", x=[label], y=[on_val],
+                    marker_color="#1f77b4", showlegend=(label=="MTA"),
+                    text=f"{on_val:.1f}%", textposition="inside",
+                ))
+                fig_split.add_trace(go.Bar(
+                    name="Offline", x=[label], y=[off_val],
+                    marker_color="#e6550d", showlegend=(label=="MTA"),
+                    text=f"{off_val:.1f}%", textposition="inside",
+                ))
+            fig_split.update_layout(
+                barmode="stack", height=420,
+                title="Online vs Offline Credit Split by Model",
+                yaxis_title="Credit Share (%)",
+                plot_bgcolor="white",
+                legend=dict(orientation="h", y=1.05),
+            )
+            st.plotly_chart(fig_split, width='stretch')
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # SECTION 6 — Unified Common Metric
+    # ─────────────────────────────────────────────────────────────────────────
+    st.markdown("---")
+    st.markdown("### 💡 Section 6 — Unified Common Metric: CPIC & Marginal ROI")
+
+    st.markdown("""
+    The final step: convert everything to a single comparable metric so TV and
+    Paid Search can be evaluated on the same axis.
+
+    - **CPIC (Cost Per Incremental Conversion):** `Total Spend ÷ Hybrid-Attributed Conversions` — lower is better
+    - **Marginal ROI:** `Hybrid-Attributed Revenue ÷ Spend` — higher is better, break-even = 1.0x
+
+    These metrics let you answer: *"If I shift $10k from TV to Paid Search, do I gain or lose?"*
+    """)
+
+    if shapley_w:
+        unified_df = compute_unified_metrics(
+            hybrid_weights,
+            total_conversions=float(total_conv),
+            total_revenue=float(total_rev),
+        )
+
+        col_cpic, col_roi = st.columns(2)
+
+        with col_cpic:
+            fig_cpic = px.bar(
+                unified_df.sort_values("cpic"),
+                x="cpic", y="channel_label",
+                orientation="h",
+                color="channel_type",
+                color_discrete_map={"Offline": "#e6550d", "Online": "#1f77b4"},
+                title="CPIC — Cost Per Incremental Conversion (Lower = Better)",
+                labels={"cpic": "CPIC ($)", "channel_label": ""},
+                text_auto="$.0f",
+            )
+            fig_cpic.update_layout(height=400, plot_bgcolor="white",
+                                   showlegend=False)
+            st.plotly_chart(fig_cpic, width='stretch')
+
+        with col_roi:
+            fig_mroi = px.bar(
+                unified_df.sort_values("marginal_roi", ascending=True),
+                x="marginal_roi", y="channel_label",
+                orientation="h",
+                color="channel_type",
+                color_discrete_map={"Offline": "#e6550d", "Online": "#1f77b4"},
+                title="Marginal ROI by Channel (Higher = Better, 1.0x = Break-even)",
+                labels={"marginal_roi": "Marginal ROI (x)", "channel_label": ""},
+                text_auto=".2f",
+            )
+            fig_mroi.add_vline(x=1.0, line_dash="dash", line_color="red",
+                               annotation_text="Break-even", annotation_position="top right")
+            fig_mroi.update_layout(height=400, plot_bgcolor="white",
+                                   showlegend=False)
+            st.plotly_chart(fig_mroi, width='stretch')
+
+        # Full unified table
+        st.markdown("#### 📋 Full Unified Metrics Table")
+        st.markdown("All channels on the same scale — online and offline, fairly compared.")
+        st.dataframe(
+            unified_df[[
+                "channel_label", "channel_type", "hybrid_weight",
+                "attributed_conversions", "spend", "cpic", "marginal_roi"
+            ]].rename(columns={
+                "channel_label": "Channel", "channel_type": "Type",
+                "hybrid_weight": "Credit Share (%)",
+                "attributed_conversions": "Attributed Conversions",
+                "spend": "Spend ($)", "cpic": "CPIC ($)", "marginal_roi": "Marginal ROI",
+            }).style
+            .format({
+                "Credit Share (%)": "{:.1f}%",
+                "Attributed Conversions": "{:.0f}",
+                "Spend ($)": "${:,.0f}",
+                "CPIC ($)": "${:,.0f}",
+                "Marginal ROI": "{:.2f}x",
+            })
+            .background_gradient(subset=["Marginal ROI"], cmap="RdYlGn")
+            .background_gradient(subset=["CPIC ($)"], cmap="RdYlGn_r"),
+            width='stretch', hide_index=True,
+        )
+
+        st.success("""
+        💡 **How to read this table:**
+        Channels with **high Marginal ROI** and **low CPIC** are your most efficient spends.
+        Channels that appear strong in MTA but drop in the Hybrid view were being
+        *overcredited* by MTA (stealing credit from offline channels upstream).
+        """)
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # SECTION 7 — Ground Truth Validation
+    # ─────────────────────────────────────────────────────────────────────────
+    st.markdown("---")
+    st.markdown("### ✅ Section 7 — Ground-Truth Validation (Synthetic Data Advantage)")
+    st.markdown("""
+    One major benefit of using **synthetic data** for MMM development is that
+    we know the *true* contribution of each channel — it's baked into the data generator.
+    In production, you'd compare your MMM-recovered contributions against these
+    to validate your model before trusting it with real budget decisions.
+    """)
+
+    truth_df = pd.DataFrame([
+        {
+            "Channel": CHANNEL_LABELS.get(ch, ch),
+            "Type": "Offline" if ch in ("tv","radio","direct_mail","agent_visit") else "Online",
+            "True Contribution %": round(v * 100, 1),
+            "Adstock Decay (λ)": ADSTOCK_DECAY.get(ch, "N/A"),
+            "Carryover Half-Life": f"{round(-1/np.log(ADSTOCK_DECAY[ch]),1)}w" if ch in ADSTOCK_DECAY else "N/A",
+        }
+        for ch, v in CHANNEL_TRUE_CONTRIBUTION.items() if ch != "base"
+    ]).sort_values("True Contribution %", ascending=False)
+
+    fig_truth = px.bar(
+        truth_df, x="Channel", y="True Contribution %", color="Type",
+        color_discrete_map={"Offline": "#e6550d", "Online": "#1f77b4"},
+        title="Ground-Truth Channel Contributions (Baked Into Synthetic DGP)",
+        text_auto=".1f",
+    )
+    fig_truth.update_layout(height=380, plot_bgcolor="white",
+                            xaxis_title="", yaxis_title="True Contribution (%)")
+    st.plotly_chart(fig_truth, width='stretch')
+
+    st.dataframe(
+        truth_df.style
+        .background_gradient(subset=["True Contribution %"], cmap="Blues")
+        .format({"True Contribution %": "{:.1f}%", "Adstock Decay (λ)": "{:.2f}"}),
+        width='stretch', hide_index=True,
+    )
+    st.caption(
+        "After fitting a real Bayesian MMM (e.g., PyMC-Marketing), the recovered "
+        "contribution coefficients should be close to the 'True Contribution %' column. "
+        "Large deviations indicate model misspecification or insufficient data."
+    )
+
+
 st.markdown("---")
 st.markdown("""
 <div style="text-align:center; color:#95a5a6; font-size:0.8rem; padding:1rem 0">

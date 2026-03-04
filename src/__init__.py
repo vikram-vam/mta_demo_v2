@@ -16,3 +16,19 @@ try:
     )
 except ImportError:
     pass  # plotly not installed; charts unavailable
+
+from .mmm_data_generator import (
+    generate_mmm_data,
+    get_channel_contribution_shares,
+    mmm_summary_stats,
+    CHANNEL_TRUE_CONTRIBUTION,
+    ADSTOCK_DECAY,
+)
+
+from .hybrid_attribution import (
+    blend_mta_mmm,
+    compute_unified_metrics,
+    compare_mta_vs_mmm_vs_hybrid,
+    offline_credit_recovery,
+    DEFAULT_ALPHA,
+)
