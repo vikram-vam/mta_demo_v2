@@ -23,6 +23,7 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 import plotly.express as px
+import base64
 
 from src import (
     generate_journeys, journey_summary, top_paths,
@@ -44,6 +45,14 @@ from src.hybrid_attribution import (
     compare_mta_vs_mmm_vs_hybrid, offline_credit_recovery,
     DEFAULT_ALPHA,
 )
+
+
+# ── Logo loader ───────────────────────────────────────────────────────────────
+def get_logo_base64(path):
+    with open(path, "rb") as f:
+        return base64.b64encode(f.read()).decode()
+
+logo_b64 = get_logo_base64("logo 1.jpg")
 
 
 # ── Page config ───────────────────────────────────────────────────────────────
@@ -157,12 +166,12 @@ def load_models(journeys_hash, _journeys, run_ord, run_bz, run_mkv, ord_samples)
         run_ordered=run_ord,
         run_banzhaf=run_bz,
         run_markov=run_mkv,
-        ordered_n_samples=ord_samples,   # was not threaded through before — now fixed
+        ordered_n_samples=ord_samples,
     )
 
 @st.cache_data(show_spinner=False)
 def load_interactions(journeys_hash, _journeys):
-    return shapley_interaction_index(_journeys)   # uses GBT CF by default
+    return shapley_interaction_index(_journeys)
 
 @st.cache_data(show_spinner=False)
 def load_markov(journeys_hash, _journeys):
@@ -170,9 +179,7 @@ def load_markov(journeys_hash, _journeys):
 
 @st.cache_data(show_spinner=False)
 def load_bootstrap_ci(journeys_hash, _journeys, n_boot):
-    """Bootstrap CIs — cached separately so they don't block the main spinner."""
     return shapley_bootstrap_ci(_journeys, n_bootstrap=n_boot, n_mc_per_boot=300, seed=42)
-
 
 @st.cache_data(show_spinner=False)
 def load_mmm_data(n_weeks: int = 104, seed: int = 42):
@@ -200,8 +207,72 @@ if n_customers < 1000:
     )
 
 
+# ── Hero Banner ───────────────────────────────────────────────────────────────
+st.markdown(f"""
+<div style="
+    background: linear-gradient(90deg, #2c3e50, #4b6cb7);
+    padding: 0 28px;
+    border-radius: 12px;
+    margin-bottom: 20px;
+    color: white;
+    display: flex;
+    align-items: stretch;
+    min-height: 90px;
+    overflow: hidden;
+">
+    <!-- Logo strip on left -->
+    <div style="
+        background: white;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 0 18px;
+        margin: 0 24px 0 -28px;
+        min-width: 110px;
+        flex-shrink: 0;
+    ">
+        <img src="data:image/jpeg;base64,{logo_b64}"
+             style="width: 80px; height: 80px; object-fit: contain; display: block;" />
+    </div>
+    <!-- Text block -->
+    <div style="
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        padding: 18px 0;
+    ">
+        <h2 style="margin: 0 0 6px 0; font-size: 1.55rem; font-weight: 700; line-height: 1.2;">
+            Marketing Attribution Intelligence Platform
+        </h2>
+        <p style="margin: 0 0 4px 0; font-size: 15px; opacity: 0.95;">
+            Unified measurement across digital and offline marketing channels
+        </p>
+        <p style="margin: 0; font-size: 12.5px; opacity: 0.82;">
+            Shapley Attribution &nbsp;•&nbsp; Markov Modeling &nbsp;•&nbsp; Marketing Mix Modeling &nbsp;•&nbsp; Budget Optimization
+        </p>
+    </div>
+</div>
+""", unsafe_allow_html=True)
+
+
+# ── Key Insight Callout ───────────────────────────────────────────────────────
+st.markdown("""
+<div style="
+background:#f8f9fa;
+border-left:5px solid #9b59b6;
+padding:15px;
+border-radius:6px;
+margin-bottom:20px;
+">
+<b>Key Insight</b><br>
+Traditional last-touch attribution significantly over-credits lower funnel
+channels like Paid Search while under-crediting upper funnel channels such as
+TV, Display, and Direct Mail. Game-theoretic attribution corrects this bias.
+</div>
+""", unsafe_allow_html=True)
+
 # ── Header ────────────────────────────────────────────────────────────────────
-st.title("🎯 Multi-Touch Attribution Demo")
+st.title("🎯 Marketing Attribution Intelligence")
 st.markdown(
     "**Cooperative Game Theory–powered attribution** — Shapley values, Banzhaf index, "
     "Ordered Shapley (Zhao 2018), and Markov chain removal effects, compared against "
@@ -311,7 +382,6 @@ with tab_compare:
         ch_label = st.selectbox("Select channel", attr_df.index.tolist())
         st.plotly_chart(model_radar(attr_df[selected], ch_label), width='stretch')
 
-        # Key insight callout
         shapley_col = "Shapley"
         lt_col = "Last Touch"
         if shapley_col in pct_df.columns and lt_col in pct_df.columns:
@@ -476,18 +546,11 @@ with tab_shapley:
 with tab_synergy:
     st.subheader("🔗 Pairwise Channel Interaction Index")
     st.markdown("""
-    The **Shapley Interaction Index** (Grabisch & Roubens, 1999) measures whether
-    two channels are *synergistic* (work better together than separately) or
-    *substitutable* (overlap in the journeys they drive).
+    The **Shapley Interaction Index** measures whether two channels are *synergistic*
+    (work better together than separately) or *substitutable* (overlap in the journeys they drive).
 
-    **Formula:**
+    **Red** = synergy (channels reinforce each other) · **Blue** = substitution (channels overlap)
     """)
-    st.latex(r"""
-    \phi_{ij}(v) = \sum_{S \subseteq N \setminus \{i,j\}}
-    \frac{|S|!\,(|N|-|S|-2)!}{(|N|-1)!}
-    \Big[v(S\cup\{i,j\}) - v(S\cup\{i\}) - v(S\cup\{j\}) + v(S)\Big]
-    """)
-    st.markdown("**Red** = synergy (channels reinforce each other) · **Blue** = substitution (channels overlap)")
 
     with st.spinner("Computing Shapley Interaction Index…"):
         int_df = load_interactions(journeys_hash, journeys)
@@ -598,7 +661,6 @@ with tab_budget:
             for ch in CHANNELS if CHANNEL_LABELS[ch] in attr_df.index
         }
 
-        # Current spend from CPT-proportional baseline
         cpt_vals = np.array([CHANNEL_CPT[ch] + 1 for ch in CHANNELS], dtype=float)
         curr_weights = cpt_vals / cpt_vals.sum()
         current_spend = {ch: total_budget * w for ch, w in zip(CHANNELS, curr_weights)}
@@ -657,8 +719,6 @@ with tab_markov:
     (its inbound transitions redirected to a null/loss state).
     """)
 
-    # Prefer the already-computed Markov values from run_all_models (cached).
-    # Fall back to load_markov only if Markov was disabled in the sidebar.
     if "Markov Chain" in attr_df.columns:
         markov_vals = {
             ch: float(attr_df.loc[CHANNEL_LABELS[ch], "Markov Chain"])
@@ -741,7 +801,6 @@ with tab_markov:
         """)
 
 
-
 # ═══════════════════════════════════════════════════════════════════════════════
 # TAB 8 — MMM + MTA HYBRID
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -770,76 +829,16 @@ with tab_mmm:
     # ── Page header ──────────────────────────────────────────────────────────
     st.markdown("## 🔀 Hybrid MMM + MTA Attribution")
 
-    st.info("""
-    **Why this tab?**
-    Your existing MTA models (Shapley, Markov) can only credit channels that appear in
-    **digital journey logs**. Offline channels — TV, Radio, Direct Mail, Agent Visits —
-    are **invisible to MTA** even though they genuinely drive conversions upstream.
-
-    **Marketing Mix Modelling (MMM)** fixes this by measuring offline impact at the
-    **weekly aggregate level** using regression with adstock + saturation transformations.
-    This tab blends both models into one unified framework with a **common metric
-    (CPIC & Marginal ROI)** so every channel can be compared on the same axis.
-    """)
 
     # ── Load MMM data (cached) ───────────────────────────────────────────────
     with st.spinner("Generating 104-week synthetic MMM dataset..."):
         mmm_df, mmm_meta = load_mmm_data(n_weeks=104, seed=42)
 
     # ─────────────────────────────────────────────────────────────────────────
-    # SECTION 1 — What is MMM and how does it work?
+    # SECTION 1 — MMM Data Overview
     # ─────────────────────────────────────────────────────────────────────────
     st.markdown("---")
-    st.markdown("### 📖 Section 1 — How MMM Works")
-
-    col_explain1, col_explain2, col_explain3 = st.columns(3)
-    with col_explain1:
-        st.markdown("""
-        **Step 1 — Collect Weekly Data**
-
-        Instead of tracking individual users, MMM works at the **aggregate level**:
-        - How much did we spend on TV this week?
-        - How many radio impressions ran?
-        - How many direct mail pieces were sent?
-        - What were total conversions that week?
-
-        External factors like seasonality, holidays, and competitor activity
-        are also included as control variables.
-        """)
-    with col_explain2:
-        st.markdown("""
-        **Step 2 — Apply Adstock & Saturation**
-
-        Two transformations make the model realistic:
-
-        **Adstock (carryover):** A TV ad aired Monday still influences
-        purchases on Thursday. Each channel has a *decay rate* λ:
-        `adstock_t = spend_t + λ × adstock_(t-1)`
-
-        **Saturation:** Doubling spend doesn't double conversions.
-        A Hill function captures this: after a point, more spend
-        delivers diminishing returns.
-        """)
-    with col_explain3:
-        st.markdown("""
-        **Step 3 — Fit Regression & Extract Contributions**
-
-        A Bayesian regression model estimates how much each channel's
-        (adstock-transformed) spend contributed to total conversions.
-
-        Output: **contribution share per channel** — e.g.,
-        "TV drove 18% of this quarter's conversions."
-
-        This is what MTA *cannot* tell you for offline channels.
-        The Hybrid model then combines MMM offline shares with
-        MTA online shares into one unified weight.
-        """)
-
-    # ─────────────────────────────────────────────────────────────────────────
-    # SECTION 2 — MMM Data Overview
-    # ─────────────────────────────────────────────────────────────────────────
-    st.markdown("---")
-    st.markdown("### 📊 Section 2 — Synthetic MMM Dataset (104 Weeks)")
+    st.markdown("### 📊 Section 1 — Synthetic MMM Dataset (104 Weeks)")
 
     st.markdown("""
     The dataset below simulates **2 years of weekly marketing data** for all channels.
@@ -884,7 +883,6 @@ with tab_mmm:
                             xaxis_title="", yaxis_title="Total Spend ($)")
     st.plotly_chart(fig_spend, width='stretch')
 
-    # Active weeks info
     st.markdown("""
     > **Notice:** Offline channels (TV, Radio, Direct Mail) show **fewer than 104 active weeks**.
     > This is intentional — offline media is typically run in **flights** (bursts), not continuously.
@@ -921,10 +919,10 @@ with tab_mmm:
     st.plotly_chart(fig_conv, width='stretch')
 
     # ─────────────────────────────────────────────────────────────────────────
-    # SECTION 3 — Adstock: The Carryover Effect
+    # SECTION 2 — Adstock: The Carryover Effect
     # ─────────────────────────────────────────────────────────────────────────
     st.markdown("---")
-    st.markdown("### 📉 Section 3 — Adstock: Why Offline Is Hard to Credit")
+    st.markdown("### 📉 Section 2 — Adstock: Why Offline Is Hard to Credit")
 
     st.markdown("""
     The core reason MTA fails for offline channels is **adstock** — the carryover effect.
@@ -997,10 +995,10 @@ with tab_mmm:
     )
 
     # ─────────────────────────────────────────────────────────────────────────
-    # SECTION 4 — The Offline Credit Gap
+    # SECTION 3 — The Offline Credit Gap
     # ─────────────────────────────────────────────────────────────────────────
     st.markdown("---")
-    st.markdown("### 🔍 Section 4 — The Offline Credit Gap: MTA vs MMM")
+    st.markdown("### 🔍 Section 3 — The Offline Credit Gap: MTA vs MMM")
 
     st.markdown("""
     This is the core problem this tab solves. The chart below shows the same 10 channels
@@ -1029,7 +1027,6 @@ with tab_mmm:
                   delta="Online channels absorb offline's missing credit",
                   delta_color="inverse")
 
-        # Side-by-side grouped bar
         fig_gap = go.Figure()
         model_config = [
             ("MTA (Shapley)", "#9b59b6", "mta_pct"),
@@ -1054,7 +1051,6 @@ with tab_mmm:
         )
         st.plotly_chart(fig_gap, width='stretch')
 
-        # Credit gap table
         with st.expander("📋 Full Credit Comparison Table — showing the undercredit/overcredit gap"):
             gap_display = comparison_df[[
                 "channel_label", "channel_type", "mta_pct", "mmm_pct", "hybrid_pct", "credit_gap"
@@ -1079,13 +1075,13 @@ with tab_mmm:
         st.caption("🔴 Red gap = MTA undercredits this channel vs MMM  |  🟢 Green = MTA overcredits")
 
     # ─────────────────────────────────────────────────────────────────────────
-    # SECTION 5 — Hybrid Blend
+    # SECTION 4 — Hybrid Blend
     # ─────────────────────────────────────────────────────────────────────────
     st.markdown("---")
-    st.markdown(f"### 🧬 Section 5 — Hybrid Blend (α = {alpha:.2f})")
+    st.markdown(f"### 🧬 Section 4 — Hybrid Blend (α = {alpha:.2f})")
 
     st.markdown(f"""
-    The blending formula is simple but powerful:
+    The blending formula combines MTA and MMM weights by channel type:
 
     | Channel Type | Formula |
     |---|---|
@@ -1122,7 +1118,6 @@ with tab_mmm:
             st.plotly_chart(fig_donut, width='stretch')
 
         with col_bar:
-            # Online vs Offline share comparison across 3 models
             offline_chs = {"tv", "radio", "direct_mail", "agent_visit"}
             mta_total = sum(shapley_w.values()) or 1
             mmm_total = sum(mmm_contributions.values()) or 1
@@ -1158,14 +1153,14 @@ with tab_mmm:
             st.plotly_chart(fig_split, width='stretch')
 
     # ─────────────────────────────────────────────────────────────────────────
-    # SECTION 6 — Unified Common Metric
+    # SECTION 5 — Unified Common Metric
     # ─────────────────────────────────────────────────────────────────────────
     st.markdown("---")
-    st.markdown("### 💡 Section 6 — Unified Common Metric: CPIC & Marginal ROI")
+    st.markdown("### 💡 Section 5 — Unified Common Metric: CPIC & Marginal ROI")
 
     st.markdown("""
-    The final step: convert everything to a single comparable metric so TV and
-    Paid Search can be evaluated on the same axis.
+    Convert everything to a single comparable metric so TV and Paid Search can be
+    evaluated on the same axis.
 
     - **CPIC (Cost Per Incremental Conversion):** `Total Spend ÷ Hybrid-Attributed Conversions` — lower is better
     - **Marginal ROI:** `Hybrid-Attributed Revenue ÷ Spend` — higher is better, break-even = 1.0x
@@ -1193,8 +1188,7 @@ with tab_mmm:
                 labels={"cpic": "CPIC ($)", "channel_label": ""},
                 text_auto="$.0f",
             )
-            fig_cpic.update_layout(height=400, plot_bgcolor="white",
-                                   showlegend=False)
+            fig_cpic.update_layout(height=400, plot_bgcolor="white", showlegend=False)
             st.plotly_chart(fig_cpic, width='stretch')
 
         with col_roi:
@@ -1210,11 +1204,9 @@ with tab_mmm:
             )
             fig_mroi.add_vline(x=1.0, line_dash="dash", line_color="red",
                                annotation_text="Break-even", annotation_position="top right")
-            fig_mroi.update_layout(height=400, plot_bgcolor="white",
-                                   showlegend=False)
+            fig_mroi.update_layout(height=400, plot_bgcolor="white", showlegend=False)
             st.plotly_chart(fig_mroi, width='stretch')
 
-        # Full unified table
         st.markdown("#### 📋 Full Unified Metrics Table")
         st.markdown("All channels on the same scale — online and offline, fairly compared.")
         st.dataframe(
@@ -1247,10 +1239,10 @@ with tab_mmm:
         """)
 
     # ─────────────────────────────────────────────────────────────────────────
-    # SECTION 7 — Ground Truth Validation
+    # SECTION 6 — Ground Truth Validation
     # ─────────────────────────────────────────────────────────────────────────
     st.markdown("---")
-    st.markdown("### ✅ Section 7 — Ground-Truth Validation (Synthetic Data Advantage)")
+    st.markdown("### ✅ Section 6 — Ground-Truth Validation (Synthetic Data Advantage)")
     st.markdown("""
     One major benefit of using **synthetic data** for MMM development is that
     we know the *true* contribution of each channel — it's baked into the data generator.
