@@ -280,7 +280,7 @@ st.markdown(
 )
 
 # ── Tabs ──────────────────────────────────────────────────────────────────────
-tab_overview, tab_compare, tab_shapley, tab_synergy, tab_journey, tab_budget, tab_markov, tab_mmm = st.tabs([
+tab_overview, tab_compare, tab_shapley, tab_synergy, tab_journey, tab_budget, tab_markov, tab_mmm, tab_scenario = st.tabs([
     "📊 Overview",
     "🎯 Model Comparison",
     "🔬 Shapley Deep Dive",
@@ -289,6 +289,7 @@ tab_overview, tab_compare, tab_shapley, tab_synergy, tab_journey, tab_budget, ta
     "💰 Budget Optimizer",
     "📈 Markov Analysis",
     "🔀 MMM + MTA Hybrid",
+    "🧪 Scenario Planner",
 ])
 
 
@@ -1282,6 +1283,973 @@ with tab_mmm:
         "contribution coefficients should be close to the 'True Contribution %' column. "
         "Large deviations indicate model misspecification or insufficient data."
     )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TAB 9 — SCENARIO PLANNER
+# ═══════════════════════════════════════════════════════════════════════════════
+with tab_scenario:
+
+    # ── Helper: response curve ────────────────────────────────────────────────
+    def _resp(spend: float, alpha: float, beta: float = 0.5) -> float:
+        """Diminishing-returns response: alpha * spend^beta."""
+        return alpha * (spend ** beta) if spend > 0 else 0.0
+
+    # ── Pull Shapley weights (already computed above) ─────────────────────────
+    if "Shapley" not in attr_df.columns:
+        st.warning("⚠️ Shapley model not computed. Enable it in the sidebar.")
+        st.stop()
+
+    sh_w = {
+        ch: float(attr_df.loc[CHANNEL_LABELS[ch], "Shapley"])
+        for ch in CHANNELS if CHANNEL_LABELS[ch] in attr_df.index
+    }
+    attr_arr   = np.array([sh_w.get(ch, 1e-6) for ch in CHANNELS])
+    attr_arr   = np.maximum(attr_arr, 1e-6)
+    alpha_arr  = attr_arr / attr_arr.sum()   # response-curve alphas
+
+    # ── Header ────────────────────────────────────────────────────────────────
+    st.markdown("## 🧪 Scenario Planner — What-If Budget Simulator")
+    st.markdown(
+        "Model the impact of **increasing or decreasing your total budget** "
+        "and see exactly which channels should absorb the change, "
+        "with projected conversion lift and statistical confidence bands."
+    )
+
+    with st.expander("💡 How to use this tab", expanded=False):
+        st.markdown(
+            "1. Set your **current** and **new** budget in Section 1.\n"
+            "2. Choose **Auto-Optimise** to let Shapley weights decide the distribution, "
+            "or **Manual** to drag sliders yourself.\n"
+            "3. Read the lift estimate and confidence band in Section 3.\n"
+            "4. Save up to 4 named scenarios and compare them side-by-side in Section 4.\n\n"
+            "> ⚠️ *Response curves use a stylised α·spend^0.5 model. "
+            "For production, replace with MMM-fitted saturation curves from the Hybrid tab.*"
+        )
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # SECTION 1 — Scenario Setup
+    # ═══════════════════════════════════════════════════════════════════════════
+    st.markdown("---")
+    st.markdown("### 📐 Section 1 — Scenario Setup")
+
+    col_s1, col_s2, col_s3 = st.columns(3)
+    with col_s1:
+        sc_current_budget = st.number_input(
+            "Current Total Budget ($)",
+            min_value=10_000, max_value=5_000_000,
+            value=int(total_budget),
+            step=10_000,
+            help="Match this to the Budget Optimizer tab for consistency.",
+        )
+    with col_s2:
+        sc_new_budget = st.number_input(
+            "New Total Budget ($)",
+            min_value=10_000, max_value=5_000_000,
+            value=int(total_budget * 1.10),
+            step=10_000,
+            help="Set higher for growth scenarios, lower for budget cut scenarios.",
+        )
+    with col_s3:
+        alloc_mode = st.radio(
+            "Distribution Mode",
+            ["🤖 Auto-Optimise", "🎛️ Manual Sliders"],
+            help=(
+                "Auto: Shapley-weighted optimal split of the delta. "
+                "Manual: You decide how to distribute the budget change."
+            ),
+        )
+
+    sc_delta = sc_new_budget - sc_current_budget
+    delta_color = "#27ae60" if sc_delta >= 0 else "#e74c3c"
+    delta_label = f"{'📈 Budget Increase' if sc_delta >= 0 else '📉 Budget Cut'}"
+
+    st.markdown(f"""
+    <div style="
+        background: linear-gradient(135deg, #f8f9fa, #e9ecef);
+        border-left: 5px solid {delta_color};
+        border-radius: 8px;
+        padding: 14px 20px;
+        margin: 12px 0;
+        display: flex;
+        gap: 40px;
+        align-items: center;
+    ">
+        <div>
+            <div style="font-size:0.75rem;color:#6c757d">Current Budget</div>
+            <div style="font-size:1.4rem;font-weight:700">${sc_current_budget:,.0f}</div>
+        </div>
+        <div style="font-size:1.8rem;color:{delta_color}">→</div>
+        <div>
+            <div style="font-size:0.75rem;color:#6c757d">New Budget</div>
+            <div style="font-size:1.4rem;font-weight:700">${sc_new_budget:,.0f}</div>
+        </div>
+        <div style="border-left:2px solid #dee2e6;padding-left:30px">
+            <div style="font-size:0.75rem;color:#6c757d">{delta_label}</div>
+            <div style="font-size:1.4rem;font-weight:700;color:{delta_color}">${sc_delta:+,.0f}
+            ({sc_delta/sc_current_budget*100:+.1f}%)</div>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # ── Compute baseline current spend per channel ────────────────────────────
+    cpt_vals    = np.array([CHANNEL_CPT[ch] + 1 for ch in CHANNELS], dtype=float)
+    curr_w      = cpt_vals / cpt_vals.sum()
+    sc_curr_spend = {ch: sc_current_budget * w for ch, w in zip(CHANNELS, curr_w)}
+
+    # ── Auto-optimise new allocation (always computed, used in auto mode) ─────
+    @st.cache_data(show_spinner=False)
+    def _scenario_optimise(sh_weights_hash, new_budget, curr_spend_vals,
+                           _sh_w, _curr_spend, min_a, max_a):
+        return optimize_budget(
+            _sh_w, new_budget,
+            min_per_channel=min_a,
+            max_per_channel=max_a,
+            current_spend=_curr_spend,
+        )
+
+    auto_opt_df = _scenario_optimise(
+        hash(tuple(sorted(sh_w.items()))),
+        sc_new_budget,
+        tuple(sc_curr_spend[ch] for ch in CHANNELS),
+        sh_w, sc_curr_spend, min_alloc, max_alloc,
+    )
+    auto_spend = dict(zip(auto_opt_df["channel"], auto_opt_df["optimised_spend"]))
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # SECTION 2 — Allocation (Auto or Manual)
+    # ═══════════════════════════════════════════════════════════════════════════
+    st.markdown("---")
+
+    if "🤖 Auto-Optimise" in alloc_mode:
+        st.markdown("### 🤖 Section 2 — Optimal Allocation (Shapley-Weighted)")
+        st.markdown(
+            "The optimizer distributes the **full new budget** using Shapley-weighted "
+            "diminishing-returns response curves. Channels that are least saturated "
+            "relative to their attribution weight absorb the most incremental spend."
+        )
+
+        st.markdown(
+            "> 💡 **Tip:** Channels with high Shapley weight AND low current spend "
+            "have the steepest marginal return — that's where your extra budget has "
+            "the highest ROI right now."
+        )
+
+        # Side-by-side current vs optimal
+        fig_auto = go.Figure()
+        ch_labels_plot = [CHANNEL_LABELS[ch] for ch in CHANNELS]
+        curr_vals = [sc_curr_spend[ch] for ch in CHANNELS]
+        opt_vals  = [auto_spend.get(ch, sc_curr_spend[ch]) for ch in CHANNELS]
+
+        fig_auto.add_trace(go.Bar(
+            name="Current Spend", x=ch_labels_plot, y=curr_vals,
+            marker_color="#95a5a6",
+            text=[f"${v:,.0f}" for v in curr_vals], textposition="outside",
+            textfont=dict(size=9),
+        ))
+        fig_auto.add_trace(go.Bar(
+            name="Optimal New Spend", x=ch_labels_plot, y=opt_vals,
+            marker_color="#9b59b6",
+            text=[f"${v:,.0f}" for v in opt_vals], textposition="outside",
+            textfont=dict(size=9),
+        ))
+        fig_auto.update_layout(
+            barmode="group", height=420, template="plotly_white",
+            title=f"Current vs Optimal Spend — New Budget ${sc_new_budget:,.0f}",
+            yaxis_title="Spend ($)", xaxis_title="",
+            legend=dict(orientation="h", y=1.08),
+            margin=dict(t=70, b=60),
+        )
+        fig_auto.update_xaxes(tickangle=-25)
+        st.plotly_chart(fig_auto, width='stretch')
+
+        # Delta bar
+        deltas = [opt_vals[i] - curr_vals[i] for i in range(len(CHANNELS))]
+        fig_delta = go.Figure(go.Bar(
+            x=ch_labels_plot, y=deltas,
+            marker_color=["#27ae60" if d >= 0 else "#e74c3c" for d in deltas],
+            text=[f"${d:+,.0f}" for d in deltas], textposition="outside",
+            textfont=dict(size=9),
+        ))
+        fig_delta.add_hline(y=0, line_color="#333", line_width=1.2)
+        fig_delta.update_layout(
+            height=340, template="plotly_white",
+            title="Budget Delta per Channel (New Optimal − Current)",
+            yaxis_title="Change ($)", xaxis_title="",
+            margin=dict(t=60, b=60),
+        )
+        fig_delta.update_xaxes(tickangle=-25)
+        st.plotly_chart(fig_delta, width='stretch')
+
+        # Which channel absorbs most of the increment — explain why
+        if sc_delta != 0:
+            delta_arr = np.array(deltas)
+            top_ch_idx = int(np.argmax(np.abs(delta_arr)))
+            top_ch     = CHANNELS[top_ch_idx]
+            top_label  = CHANNEL_LABELS[top_ch]
+            top_delta  = deltas[top_ch_idx]
+            top_sh_pct = sh_w.get(top_ch, 0) * 100
+            st.success(
+                f"🔍 **Key insight:** **{top_label}** absorbs the largest share of the budget change "
+                f"(${top_delta:+,.0f}) because it holds the highest Shapley weight "
+                f"({top_sh_pct:.1f}%) relative to its current saturation level. "
+                f"Its marginal return on additional spend is steeper than competing channels."
+            )
+
+        sc_new_spend = auto_spend
+
+    else:
+        # ── Manual sliders ────────────────────────────────────────────────────
+        st.markdown("### 🎛️ Section 2 — Manual Budget Allocation")
+        st.markdown(
+            "Drag sliders to manually distribute the **new total budget** across channels. "
+            "Online and offline channels are separated into distinct panels. "
+            "The budget tracker updates live — green means fully allocated."
+        )
+        st.markdown(
+            "> 💡 **Tip:** Start by matching the auto-optimised allocation "
+            "as a benchmark, then override specific channels to test your hypothesis. "
+            "Watch the projected lift in Section 3 update in real time."
+        )
+
+        default_auto = {ch: auto_spend.get(ch, sc_curr_spend[ch]) for ch in CHANNELS}
+        online_chs  = [ch for ch in CHANNELS if CHANNEL_TYPE[ch] == "Online"]
+        offline_chs = [ch for ch in CHANNELS if CHANNEL_TYPE[ch] == "Offline"]
+
+        # ── live budget tracker (top) ─────────────────────────────────────────
+        st.markdown(f"""
+        <div style="
+            background: linear-gradient(135deg,#1a1a2e,#16213e);
+            border-radius:12px; padding:16px 24px; margin:0 0 18px 0;
+            display:flex; align-items:center; gap:32px; flex-wrap:wrap;
+        ">
+            <div>
+                <div style="font-size:0.7rem;color:#adb5bd;letter-spacing:.08em;
+                            text-transform:uppercase">Total Budget</div>
+                <div style="font-size:1.5rem;font-weight:800;color:#fff">
+                    ${sc_new_budget:,.0f}</div>
+            </div>
+            <div style="height:36px;width:1px;background:#444"></div>
+            <div>
+                <div style="font-size:0.7rem;color:#adb5bd;letter-spacing:.08em;
+                            text-transform:uppercase">Online Channels</div>
+                <div style="font-size:1.1rem;font-weight:700;color:#4fc3f7">
+                    ${sum(default_auto[ch] for ch in online_chs):,.0f}</div>
+            </div>
+            <div>
+                <div style="font-size:0.7rem;color:#adb5bd;letter-spacing:.08em;
+                            text-transform:uppercase">Offline Channels</div>
+                <div style="font-size:1.1rem;font-weight:700;color:#ffb74d">
+                    ${sum(default_auto[ch] for ch in offline_chs):,.0f}</div>
+            </div>
+            <div style="height:36px;width:1px;background:#444"></div>
+            <div style="font-size:0.75rem;color:#adb5bd;font-style:italic">
+                Adjust sliders below — tracker updates on rerun
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        manual_allocs = {}
+
+        # ── channel slider helper ─────────────────────────────────────────────
+        def _channel_slider(ch, accent_color):
+            ch_label   = CHANNEL_LABELS[ch]
+            sh_pct     = sh_w.get(ch, 0) * 100
+            curr_sp    = sc_curr_spend[ch]
+            default_v  = int(round(default_auto[ch] / 1000) * 1000)
+            max_v      = int(sc_new_budget * 0.60)  # cap at 60% per channel
+
+            # Render Shapley pill first (static)
+            st.markdown(f"""
+            <div style="
+                display:flex; justify-content:space-between;
+                align-items:center; margin-bottom:2px;
+            ">
+                <span style="font-weight:600;font-size:0.88rem;color:#212529">
+                    {ch_label}
+                </span>
+                <span style="
+                    background:{accent_color}22;
+                    color:{accent_color};
+                    border:1px solid {accent_color}55;
+                    border-radius:20px;padding:1px 8px;
+                    font-size:0.7rem;font-weight:700
+                ">Shapley {sh_pct:.1f}%</span>
+            </div>
+            """, unsafe_allow_html=True)
+
+            val = st.slider(
+                label=f"__{ch_label}__",
+                min_value=0,
+                max_value=max_v,
+                value=min(default_v, max_v),
+                step=1_000,
+                key=f"slider_{ch}",
+                label_visibility="collapsed",
+                help=f"Shapley weight: {sh_pct:.1f}%  |  "
+                     f"Current spend: ${curr_sp:,.0f}  |  "
+                     f"Auto-optimal: ${default_auto[ch]:,.0f}",
+            )
+
+            # Live delta pill — computed AFTER slider renders using actual val
+            live_delta     = val - curr_sp
+            live_sign      = "▲" if live_delta >= 0 else "▼"
+            live_col       = "#4caf50" if live_delta >= 0 else "#ef5350"
+
+            # spend display pill + live delta below slider
+            st.markdown(f"""
+            <div style="
+                display:flex;justify-content:space-between;align-items:center;
+                margin-top:-8px;margin-bottom:10px;
+                font-size:0.75rem;color:#6c757d
+            ">
+                <span>$0</span>
+                <span style="display:flex;gap:8px;align-items:center">
+                    <span style="
+                        background:{accent_color};color:#fff;
+                        border-radius:6px;padding:1px 10px;
+                        font-weight:700;font-size:0.8rem
+                    ">${val:,.0f}</span>
+                    <span style="color:{live_col};font-weight:600;font-size:0.75rem">
+                        {live_sign} ${abs(live_delta):,.0f}</span>
+                </span>
+                <span>${max_v:,.0f}</span>
+            </div>
+            """, unsafe_allow_html=True)
+
+            return val
+
+        # ── ONLINE container ──────────────────────────────────────────────────
+        st.markdown(f"""
+        <div style="
+            border:2px solid #1976d2;border-radius:14px;
+            padding:18px 22px 8px 22px;margin-bottom:20px;
+            background:linear-gradient(135deg,#e3f2fd 0%,#fafeff 100%);
+        ">
+        <div style="
+            display:flex;align-items:center;gap:10px;margin-bottom:16px
+        ">
+            <span style="
+                background:#1976d2;color:white;border-radius:8px;
+                padding:3px 14px;font-size:0.8rem;font-weight:700;
+                letter-spacing:.06em;text-transform:uppercase
+            ">🌐 Online Channels</span>
+            <span style="font-size:0.78rem;color:#555">
+                Digital — trackable in MTA journeys
+            </span>
+        </div>
+        """, unsafe_allow_html=True)
+
+        oc1, oc2 = st.columns(2)
+        for idx, ch in enumerate(online_chs):
+            with (oc1 if idx % 2 == 0 else oc2):
+                manual_allocs[ch] = _channel_slider(ch, "#1976d2")
+
+        st.markdown("</div>", unsafe_allow_html=True)
+
+        # ── OFFLINE container ─────────────────────────────────────────────────
+        st.markdown(f"""
+        <div style="
+            border:2px solid #e65100;border-radius:14px;
+            padding:18px 22px 8px 22px;margin-bottom:20px;
+            background:linear-gradient(135deg,#fff3e0 0%,#fffaf6 100%);
+        ">
+        <div style="
+            display:flex;align-items:center;gap:10px;margin-bottom:16px
+        ">
+            <span style="
+                background:#e65100;color:white;border-radius:8px;
+                padding:3px 14px;font-size:0.8rem;font-weight:700;
+                letter-spacing:.06em;text-transform:uppercase
+            ">📺 Offline Channels</span>
+            <span style="font-size:0.78rem;color:#555">
+                TV · Radio · Direct Mail · Agent Visit — adstock-driven, use MMM for precision
+            </span>
+        </div>
+        """, unsafe_allow_html=True)
+
+        fc1, fc2 = st.columns(2)
+        for idx, ch in enumerate(offline_chs):
+            with (fc1 if idx % 2 == 0 else fc2):
+                manual_allocs[ch] = _channel_slider(ch, "#e65100")
+
+        st.markdown("</div>", unsafe_allow_html=True)
+
+        # ── live budget tracker (bottom) ──────────────────────────────────────
+        total_manual    = sum(manual_allocs.values())
+        remaining       = sc_new_budget - total_manual
+        alloc_pct       = min(total_manual / max(sc_new_budget, 1) * 100, 100)
+        rem_color       = "#27ae60" if abs(remaining) < 1_000 else (
+                          "#f39c12" if abs(remaining) < 5_000 else "#e74c3c")
+        bar_color       = "#27ae60" if abs(remaining) < 1_000 else (
+                          "#f39c12" if abs(remaining) < 5_000 else "#3498db")
+
+        online_total  = sum(manual_allocs[ch] for ch in online_chs)
+        offline_total = sum(manual_allocs[ch] for ch in offline_chs)
+
+        st.markdown(f"""
+        <div style="
+            background:#f8f9fa;border-radius:12px;
+            padding:16px 22px;margin:4px 0 6px 0;
+            border:1px solid #dee2e6;
+        ">
+            <!-- progress bar -->
+            <div style="
+                height:8px;border-radius:99px;
+                background:#dee2e6;margin-bottom:12px;overflow:hidden
+            ">
+                <div style="
+                    height:100%;width:{alloc_pct:.1f}%;
+                    background:{bar_color};border-radius:99px;
+                    transition:width .3s ease
+                "></div>
+            </div>
+            <!-- row of stats -->
+            <div style="display:flex;gap:28px;flex-wrap:wrap;align-items:center">
+                <div>
+                    <div style="font-size:0.68rem;color:#6c757d;text-transform:uppercase;
+                                letter-spacing:.07em">Allocated</div>
+                    <div style="font-size:1.1rem;font-weight:700;color:#212529">
+                        ${total_manual:,.0f}</div>
+                </div>
+                <div>
+                    <div style="font-size:0.68rem;color:#6c757d;text-transform:uppercase;
+                                letter-spacing:.07em">Remaining</div>
+                    <div style="font-size:1.1rem;font-weight:700;color:{rem_color}">
+                        ${remaining:+,.0f}</div>
+                </div>
+                <div>
+                    <div style="font-size:0.68rem;color:#6c757d;text-transform:uppercase;
+                                letter-spacing:.07em">🌐 Online</div>
+                    <div style="font-size:1rem;font-weight:600;color:#1976d2">
+                        ${online_total:,.0f}
+                        ({online_total/max(total_manual,1)*100:.0f}%)</div>
+                </div>
+                <div>
+                    <div style="font-size:0.68rem;color:#6c757d;text-transform:uppercase;
+                                letter-spacing:.07em">📺 Offline</div>
+                    <div style="font-size:1rem;font-weight:600;color:#e65100">
+                        ${offline_total:,.0f}
+                        ({offline_total/max(total_manual,1)*100:.0f}%)</div>
+                </div>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        sc_new_spend = manual_allocs
+
+        # ── Compute button + budget gate ──────────────────────────────────────
+        st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
+
+        budget_ok = abs(remaining) < 1_000   # within $1k tolerance
+
+        if not budget_ok:
+            over_under = "over-allocated" if remaining < 0 else "under-allocated"
+            st.markdown(f"""
+            <div style="
+                background:#fff8e1;border:1.5px solid #f39c12;
+                border-radius:10px;padding:14px 20px;margin-bottom:12px;
+                display:flex;align-items:center;gap:14px;
+            ">
+                <span style="font-size:1.6rem">⚠️</span>
+                <div>
+                    <div style="font-weight:700;color:#b7770d;font-size:0.95rem">
+                        Budget not fully allocated</div>
+                    <div style="color:#7d5a00;font-size:0.82rem;margin-top:2px">
+                        You are <b>{over_under}</b> by
+                        <b>${abs(remaining):,.0f}</b>
+                        (${total_manual:,.0f} of ${sc_new_budget:,.0f} used).
+                        Adjust the sliders above until the tracker turns green,
+                        then click <b>Compute Impact</b>.
+                    </div>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+
+        col_btn, _ = st.columns([1, 3])
+        with col_btn:
+            compute_clicked = st.button(
+                "⚡ Compute Impact",
+                disabled=not budget_ok,
+                type="primary",
+                use_container_width=True,
+                help="Fully allocate the budget first (tracker must be green).",
+            )
+
+        # Hash of current slider state — used to detect changes after compute
+        current_slider_hash = hash(tuple(
+            st.session_state.get(f"slider_{ch}", 0) for ch in CHANNELS
+        ) + (sc_new_budget,))
+
+        # Persist the confirmed allocation in session state
+        if compute_clicked and budget_ok:
+            st.session_state["sc_confirmed_spend"]       = dict(sc_new_spend)
+            st.session_state["sc_confirmed_budget"]      = sc_new_budget
+            st.session_state["sc_confirmed_slider_hash"] = current_slider_hash
+
+        # Invalidate results if sliders have changed since last compute
+        if st.session_state.get("sc_confirmed_slider_hash") != current_slider_hash:
+            st.session_state.pop("sc_confirmed_spend",       None)
+            st.session_state.pop("sc_confirmed_budget",      None)
+            st.session_state.pop("sc_confirmed_slider_hash", None)
+
+        # Gate Section 3+ on confirmed spend existing
+        _confirmed = st.session_state.get("sc_confirmed_spend")
+        if _confirmed is None:
+            st.markdown("""
+            <div style="
+                background:#f0f4ff;border:1.5px dashed #9b59b6;
+                border-radius:12px;padding:30px;margin-top:18px;
+                text-align:center;color:#6c757d;
+            ">
+                <div style="font-size:2rem;margin-bottom:8px">📊</div>
+                <div style="font-weight:600;font-size:1rem;color:#4a235a">
+                    Results will appear here</div>
+                <div style="font-size:0.85rem;margin-top:4px">
+                    Fully allocate the budget and click
+                    <b>⚡ Compute Impact</b> to see projections,
+                    confidence bands, and the scenario comparison.
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+            st.stop()
+
+        # Use the confirmed (locked) allocation for all downstream computation
+        sc_new_spend = _confirmed
+
+    # If auto mode, always allow Section 3 (no gate needed)
+    if "🤖 Auto-Optimise" in alloc_mode:
+        if "sc_confirmed_spend" in st.session_state:
+            del st.session_state["sc_confirmed_spend"]
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # SECTION 3 — Projected Impact + Statistical Significance
+    # ═══════════════════════════════════════════════════════════════════════════
+    st.markdown("---")
+    st.markdown("### 📊 Section 3 — Projected Conversion Impact & Statistical Significance")
+
+    st.markdown(
+        "Response curves (α·spend^0.5) translate spend into expected conversions. "
+        "Confidence bands are derived from **Shapley bootstrap CIs** — "
+        "the uncertainty in attribution propagates into the conversion projections. "
+        "Enable Bootstrap CIs in the sidebar (Shapley Deep Dive tab) for tighter bands."
+    )
+
+    # Compute current and new responses per channel
+    curr_responses = {}
+    new_responses  = {}
+    for i, ch in enumerate(CHANNELS):
+        a = alpha_arr[i]
+        curr_responses[ch] = _resp(sc_curr_spend[ch], a)
+        new_responses[ch]  = _resp(sc_new_spend.get(ch, sc_curr_spend[ch]), a)
+
+    total_curr_resp = sum(curr_responses.values())
+    total_new_resp  = sum(new_responses.values())
+    total_lift_resp = total_new_resp - total_curr_resp
+
+    # Scale response units to real conversions from MTA data
+    total_conv_float = float(sum(1 for j in journeys if j["converted"]))
+    scale_factor     = total_conv_float / max(total_curr_resp, 1e-9)
+
+    proj_curr_conv = total_curr_resp * scale_factor
+    proj_new_conv  = total_new_resp  * scale_factor
+    proj_lift_conv = proj_new_conv - proj_curr_conv
+    proj_lift_pct  = proj_lift_conv / max(proj_curr_conv, 1) * 100
+
+    # ── Confidence band: propagate Shapley CI uncertainty if available ────────
+    ci_available = run_ci and "ci_df" in dir()
+    try:
+        if run_ci:
+            ci_df_sp = load_bootstrap_ci(journeys_hash, journeys, n_bootstrap)
+            ci_available = True
+        else:
+            ci_df_sp = None
+    except Exception:
+        ci_df_sp = None
+        ci_available = False
+
+    # Build per-channel CI bands on response
+    ch_ci_width = {}
+    if ci_available and ci_df_sp is not None:
+        for _, row in ci_df_sp.iterrows():
+            ch_ci_width[row["channel"]] = float(row["ci_width"])
+    else:
+        # Fallback: assume ±15% CI width on each Shapley weight
+        for ch in CHANNELS:
+            ch_ci_width[ch] = sh_w.get(ch, 0.05) * 0.30
+
+    # Propagate CI through response curve (linear approximation)
+    lift_variance = 0.0
+    for i, ch in enumerate(CHANNELS):
+        a        = alpha_arr[i]
+        new_sp   = sc_new_spend.get(ch, sc_curr_spend[ch])
+        curr_sp  = sc_curr_spend[ch]
+        # d(response)/d(alpha) at current allocation
+        if new_sp > 0:
+            dR_da    = new_sp ** 0.5
+        else:
+            dR_da    = 0.0
+        ci_w     = ch_ci_width.get(ch, 0.02)
+        lift_variance += (dR_da * ci_w) ** 2
+
+    lift_std_resp    = lift_variance ** 0.5
+    lift_std_conv    = lift_std_resp * scale_factor
+    ci_lower_conv    = proj_lift_conv - 1.96 * lift_std_conv
+    ci_upper_conv    = proj_lift_conv + 1.96 * lift_std_conv
+
+    # Statistical significance: is the lift > 0 at 95% confidence?
+    is_significant   = ci_lower_conv > 0 if proj_lift_conv > 0 else ci_upper_conv < 0
+    z_score          = proj_lift_conv / max(lift_std_conv, 1e-9)
+
+    # ── KPI strip ─────────────────────────────────────────────────────────────
+    k1, k2, k3, k4 = st.columns(4)
+    kpi_data = [
+        (k1, "Current Conversions",  f"{proj_curr_conv:,.0f}", "#3498db"),
+        (k2, "Conversion Lift",       f"{proj_lift_conv:+,.0f} ({proj_lift_pct:+.1f}%)",
+             "#27ae60" if proj_lift_conv >= 0 else "#e74c3c"),
+        (k3, "95% CI Range",          f"{ci_lower_conv:+.0f} to {ci_upper_conv:+.0f}", "#e67e22"),
+        (k4, "Statistically Significant",
+             "✅ Yes" if is_significant else "⚠️ No",
+             "#27ae60" if is_significant else "#e74c3c"),
+    ]
+    for col, label, val, color in kpi_data:
+        with col:
+            st.markdown(f"""
+            <div class="metric-card" style="border-color:{color}">
+                <h3>{label}</h3>
+                <h2 style="color:{color};font-size:1.2rem">{val}</h2>
+            </div>""", unsafe_allow_html=True)
+
+    if not is_significant:
+        st.warning(
+            f"⚠️ **Lift is not statistically significant at 95% confidence.** "
+            f"The projected lift of {proj_lift_conv:+.0f} conversions falls within "
+            f"the attribution noise range (z={z_score:.2f}). "
+            f"Consider a larger budget change or enabling Bootstrap CIs in the sidebar "
+            f"for more precise uncertainty estimates."
+        )
+    else:
+        st.success(
+            f"✅ **Lift is statistically significant** (z={z_score:.2f}). "
+            f"The projected +{proj_lift_conv:.0f} conversions lie outside the 95% "
+            f"confidence band — this is a reliably detectable improvement."
+        )
+
+    # ── Per-channel lift waterfall ─────────────────────────────────────────────
+    ch_lifts     = [(CHANNEL_LABELS[ch],
+                     (new_responses[ch] - curr_responses[ch]) * scale_factor,
+                     CHANNEL_COLORS.get(ch, "#aaa"))
+                    for ch in CHANNELS]
+    ch_lifts_s   = sorted(ch_lifts, key=lambda x: -x[1])
+    lift_labels  = [x[0] for x in ch_lifts_s]
+    lift_vals    = [x[1] for x in ch_lifts_s]
+    lift_colors  = [x[2] for x in ch_lifts_s]
+
+    # CI band per channel (proportional share of total CI)
+    ch_lift_ci   = []
+    for ch in sorted(CHANNELS, key=lambda c: -(new_responses[c] - curr_responses[c])):
+        share = abs(new_responses[ch] - curr_responses[ch]) / max(abs(total_lift_resp), 1e-9)
+        ch_lift_ci.append(1.96 * lift_std_conv * share)
+
+    fig_lift = go.Figure()
+    fig_lift.add_trace(go.Bar(
+        x=lift_labels, y=lift_vals,
+        marker_color=lift_colors,
+        error_y=dict(type="data", array=ch_lift_ci, visible=True,
+                     color="#4a235a", thickness=2, width=6),
+        text=[f"{v:+.0f}" for v in lift_vals],
+        textposition="outside",
+        name="Projected Lift",
+    ))
+    fig_lift.add_hline(y=0, line_color="#333", line_width=1.2)
+    fig_lift.update_layout(
+        height=400, template="plotly_white",
+        title="Projected Conversion Lift per Channel (with 95% CI whiskers)",
+        yaxis_title="Incremental Conversions",
+        xaxis_title="",
+        margin=dict(t=60, b=60),
+    )
+    fig_lift.update_xaxes(tickangle=-25)
+    st.plotly_chart(fig_lift, width='stretch')
+
+    # ── Response curve visualiser ─────────────────────────────────────────────
+    st.markdown("#### 📈 Spend-Response Curves — Current vs New Spend Point")
+    st.markdown(
+        "> 💡 **Reading this chart:** Each curve shows diminishing returns for one channel. "
+        "The dot marks where you are now; the triangle marks where the new budget puts you. "
+        "Channels with steep curves at the new point still have room to grow."
+    )
+
+    rc_ch = st.selectbox(
+        "Channel to inspect",
+        [CHANNEL_LABELS[ch] for ch in CHANNELS],
+        key="rc_ch_select",
+    )
+    rc_ch_key = next(ch for ch in CHANNELS if CHANNEL_LABELS[ch] == rc_ch)
+    rc_idx    = CHANNELS.index(rc_ch_key)
+    rc_alpha  = alpha_arr[rc_idx]
+    rc_color  = CHANNEL_COLORS.get(rc_ch_key, "#9b59b6")
+
+    x_max = max(sc_curr_spend[rc_ch_key], sc_new_spend.get(rc_ch_key, 0)) * 1.5 + 5_000
+    x_range = np.linspace(0, x_max, 300)
+    y_range = [_resp(x, rc_alpha) * scale_factor for x in x_range]
+
+    fig_rc = go.Figure()
+    fig_rc.add_trace(go.Scatter(
+        x=x_range, y=y_range,
+        mode="lines", name="Response Curve",
+        line=dict(color=rc_color, width=2.5),
+    ))
+    # Current point
+    curr_pt_y = _resp(sc_curr_spend[rc_ch_key], rc_alpha) * scale_factor
+    fig_rc.add_trace(go.Scatter(
+        x=[sc_curr_spend[rc_ch_key]], y=[curr_pt_y],
+        mode="markers", name="Current Spend",
+        marker=dict(color="#3498db", size=14, symbol="circle",
+                    line=dict(color="white", width=2)),
+    ))
+    # New point
+    new_sp_rc = sc_new_spend.get(rc_ch_key, sc_curr_spend[rc_ch_key])
+    new_pt_y  = _resp(new_sp_rc, rc_alpha) * scale_factor
+    fig_rc.add_trace(go.Scatter(
+        x=[new_sp_rc], y=[new_pt_y],
+        mode="markers", name="New Spend",
+        marker=dict(color="#27ae60", size=14, symbol="triangle-up",
+                    line=dict(color="white", width=2)),
+    ))
+    # Lift annotation arrow
+    fig_rc.add_annotation(
+        x=new_sp_rc, y=new_pt_y,
+        ax=sc_curr_spend[rc_ch_key], ay=curr_pt_y,
+        xref="x", yref="y", axref="x", ayref="y",
+        arrowhead=3, arrowwidth=2, arrowcolor=delta_color,
+        text=f"{new_pt_y - curr_pt_y:+.1f} conv",
+        font=dict(size=11, color=delta_color),
+        showarrow=True,
+    )
+    fig_rc.update_layout(
+        height=370, template="plotly_white",
+        title=f"{rc_ch} — Spend-Response Curve (α·spend^0.5, scaled to actual conversions)",
+        xaxis_title="Spend ($)", yaxis_title="Expected Conversions",
+        legend=dict(orientation="h", y=1.05),
+        margin=dict(t=70, b=50),
+    )
+    st.plotly_chart(fig_rc, width='stretch')
+
+    # ── Marginal ROI table ────────────────────────────────────────────────────
+    st.markdown("#### 📋 Channel-Level Projections")
+    st.markdown(
+        "> 💡 **Marginal ROI** = projected revenue from new conversions ÷ additional spend. "
+        "Values > 1.0x mean you're getting more revenue than you're putting in at the margin."
+    )
+
+    avg_order_val_sc = float(sum(j["value"] for j in journeys)) / max(
+        float(sum(1 for j in journeys if j["converted"])), 1
+    )
+
+    proj_rows = []
+    for i, ch in enumerate(CHANNELS):
+        a        = alpha_arr[i]
+        curr_sp  = sc_curr_spend[ch]
+        new_sp   = sc_new_spend.get(ch, curr_sp)
+        sp_delta = new_sp - curr_sp
+        c_resp   = curr_responses[ch] * scale_factor
+        n_resp   = new_responses[ch]  * scale_factor
+        lift     = n_resp - c_resp
+        mroi     = (lift * avg_order_val_sc) / max(abs(sp_delta), 1) if sp_delta != 0 else 0.0
+        proj_rows.append({
+            "Channel":         CHANNEL_LABELS[ch],
+            "Type":            CHANNEL_TYPE[ch],
+            "Shapley Wt (%)":  round(sh_w.get(ch, 0) * 100, 1),
+            "Current Spend":   round(curr_sp, 0),
+            "New Spend":       round(new_sp, 0),
+            "Δ Spend":         round(sp_delta, 0),
+            "Curr Conv (est)": round(c_resp, 1),
+            "New Conv (est)":  round(n_resp, 1),
+            "Conv Lift":       round(lift, 1),
+            "Marginal ROI":    round(mroi, 2),
+        })
+
+    proj_df = pd.DataFrame(proj_rows).sort_values("Conv Lift", ascending=False)
+
+    def _color_lift(val):
+        if val > 0:  return "color:#27ae60;font-weight:600"
+        if val < 0:  return "color:#e74c3c;font-weight:600"
+        return ""
+
+    def _color_mroi(val):
+        if val > 1.5: return "background-color:#d5f5e3"
+        if val > 1.0: return "background-color:#eafaf1"
+        if val < 0:   return "background-color:#fde8e8"
+        return ""
+
+    st.dataframe(
+        proj_df.style
+            .applymap(_color_lift, subset=["Conv Lift", "Δ Spend"])
+            .applymap(_color_mroi, subset=["Marginal ROI"])
+            .format({
+                "Shapley Wt (%)":  "{:.1f}%",
+                "Current Spend":   "${:,.0f}",
+                "New Spend":       "${:,.0f}",
+                "Δ Spend":         "${:+,.0f}",
+                "Curr Conv (est)": "{:.1f}",
+                "New Conv (est)":  "{:.1f}",
+                "Conv Lift":       "{:+.1f}",
+                "Marginal ROI":    "{:.2f}x",
+            }),
+        width='stretch', hide_index=True,
+    )
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # SECTION 4 — Scenario Comparison
+    # ═══════════════════════════════════════════════════════════════════════════
+    st.markdown("---")
+    st.markdown("### 💾 Section 4 — Scenario Comparison")
+    st.markdown(
+        "Save your current scenario and compare up to **4 named scenarios** side-by-side. "
+        "Useful for stakeholder presentations — 'Scenario A is the base, B is growth, C is the cut.'"
+    )
+    st.markdown(
+        "> 💡 **Tip:** Run the tab with different budgets or allocation modes, "
+        "save each as a named scenario, then read the comparison table to decide which to present."
+    )
+
+    if "sc_saved" not in st.session_state:
+        st.session_state["sc_saved"] = {}
+
+    sc_name = st.text_input("Scenario name", value=f"Scenario {len(st.session_state['sc_saved'])+1}")
+
+    if st.button("💾 Save this scenario"):
+        if len(st.session_state["sc_saved"]) >= 4:
+            st.warning("Maximum 4 scenarios saved. Clear one to add more.")
+        else:
+            st.session_state["sc_saved"][sc_name] = {
+                "budget":      sc_new_budget,
+                "delta":       sc_delta,
+                "mode":        alloc_mode,
+                "proj_conv":   round(proj_new_conv, 1),
+                "lift_conv":   round(proj_lift_conv, 1),
+                "lift_pct":    round(proj_lift_pct, 2),
+                "ci_lower":    round(ci_lower_conv, 1),
+                "ci_upper":    round(ci_upper_conv, 1),
+                "significant": is_significant,
+                "spend_snap":  {CHANNEL_LABELS[ch]: round(sc_new_spend.get(ch, 0), 0) for ch in CHANNELS},
+            }
+            st.success(f"✅ Saved: **{sc_name}**")
+
+    if st.session_state["sc_saved"]:
+        if st.button("🗑️ Clear all scenarios"):
+            st.session_state["sc_saved"] = {}
+            st.rerun()
+
+        st.markdown("#### Saved Scenarios")
+        comp_rows = []
+        for sname, sdata in st.session_state["sc_saved"].items():
+            comp_rows.append({
+                "Scenario":        sname,
+                "Mode":            sdata["mode"].replace("🤖 ", "").replace("🎛️ ", ""),
+                "New Budget ($)":  sdata["budget"],
+                "Δ Budget ($)":    sdata["delta"],
+                "Proj. Conv.":     sdata["proj_conv"],
+                "Conv. Lift":      sdata["lift_conv"],
+                "Lift (%)":        sdata["lift_pct"],
+                "CI Lower":        sdata["ci_lower"],
+                "CI Upper":        sdata["ci_upper"],
+                "Significant?":    "✅ Yes" if sdata["significant"] else "⚠️ No",
+            })
+
+        comp_df = pd.DataFrame(comp_rows)
+        st.dataframe(
+            comp_df.style.format({
+                "New Budget ($)":  "${:,.0f}",
+                "Δ Budget ($)":    "${:+,.0f}",
+                "Proj. Conv.":     "{:,.1f}",
+                "Conv. Lift":      "{:+.1f}",
+                "Lift (%)":        "{:+.2f}%",
+                "CI Lower":        "{:+.1f}",
+                "CI Upper":        "{:+.1f}",
+            }).background_gradient(subset=["Lift (%)"], cmap="RdYlGn"),
+            width='stretch', hide_index=True,
+        )
+
+        # Visual comparison bar chart
+        if len(comp_rows) > 1:
+            fig_comp_sc = go.Figure()
+            for row in comp_rows:
+                fig_comp_sc.add_trace(go.Bar(
+                    name=row["Scenario"],
+                    x=["Projected Conversions", "Conversion Lift"],
+                    y=[row["Proj. Conv."], row["Conv. Lift"]],
+                    text=[f"{row['Proj. Conv.']:,.1f}", f"{row['Conv. Lift']:+.1f}"],
+                    textposition="outside",
+                ))
+            fig_comp_sc.update_layout(
+                barmode="group", height=380, template="plotly_white",
+                title="Scenario Comparison — Projected Conversions & Lift",
+                yaxis_title="Conversions",
+                legend=dict(orientation="h", y=1.1),
+                margin=dict(t=70, b=50),
+            )
+            st.plotly_chart(fig_comp_sc, width='stretch')
+
+            # Spend breakdown per scenario
+            st.markdown("#### Channel Spend Breakdown by Scenario")
+            spend_rows = []
+            for sname, sdata in st.session_state["sc_saved"].items():
+                for ch_lbl, sp in sdata["spend_snap"].items():
+                    spend_rows.append({"Scenario": sname, "Channel": ch_lbl, "Spend ($)": sp})
+            spend_comp_df = pd.DataFrame(spend_rows)
+            fig_spend_comp = px.bar(
+                spend_comp_df, x="Channel", y="Spend ($)", color="Scenario",
+                barmode="group", height=400, template="plotly_white",
+                title="Per-Channel Spend by Scenario",
+            )
+            fig_spend_comp.update_xaxes(tickangle=-25)
+            st.plotly_chart(fig_spend_comp, width='stretch')
+    else:
+        st.info("No scenarios saved yet. Configure a scenario above and click **Save**.")
+
+    # ── Methodological note ───────────────────────────────────────────────────
+    st.markdown("---")
+    with st.expander("📚 Methodology & Limitations"):
+        st.markdown(f"""
+        **Response Curve Model**
+
+        Each channel's conversion response to spend follows:
+        """)
+        st.latex(r"R_i(\text{spend}) = \alpha_i \cdot \text{spend}^{0.5}")
+        st.markdown(f"""
+        where $\\alpha_i$ is proportional to the channel's Shapley attribution weight.
+        This is a stylised diminishing-returns model — doubling spend yields ~1.41× conversions,
+        not 2×. Real saturation curves should be fitted from MMM historical data
+        (see the **MMM + MTA Hybrid** tab for the path to production-grade curves).
+
+        **Confidence Bands**
+
+        Uncertainty in Shapley weights (from bootstrap resampling) is propagated through the
+        response curve via a first-order linear approximation:
+
+        $\\sigma_{{\\text{{lift}}}}^2 = \\sum_i \\left(\\frac{{\\partial R_i}}{{\\partial \\alpha_i}} \\cdot \\sigma_{{\\alpha_i}}\\right)^2$
+
+        With Bootstrap CIs **{"enabled (n=" + str(n_bootstrap) + " resamples)" if run_ci else "disabled"}**,
+        bands use {"actual bootstrap standard errors" if run_ci else "a fallback ±15% of each channel's Shapley weight (conservative estimate)"}.
+        Enable Bootstrap CIs in the sidebar for tighter, data-driven bands.
+
+        **Statistical Significance**
+
+        Significance is assessed via a two-sided z-test:
+        $z = \\text{{lift}} / \\sigma_{{\\text{{lift}}}}$. The threshold is $|z| > 1.96$ (95% confidence).
+        This is an approximation — in production, use a proper experiment (A/B geo-test or
+        synthetic control) to validate lift.
+
+        **MTA vs MMM caveat**
+
+        This simulator uses MTA Shapley weights as attribution signals.
+        MTA cannot see offline channels (TV, Radio, Direct Mail, Agent Visit) — they receive
+        near-zero Shapley credit. Offline spend changes are therefore **underestimated** here.
+        For offline budget scenarios, use the MMM contribution shares from the Hybrid tab as
+        the response curve alphas instead.
+        """)
 
 
 st.markdown("---")
